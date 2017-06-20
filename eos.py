@@ -3,8 +3,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
-from  scipy.interpolate import interp1d, interp2d
-from  scipy.optimize import fmin
+from scipy.interpolate import interp1d, interp2d
+from scipy.optimize import fmin
+#from scipy.integrate import cumtrapz
 
 class EOS:
     def __init__(self, filename, hugoniot_method="EOS-contour", **kwargs):
@@ -169,7 +170,6 @@ class Hugoniot:
         if method == "EOS-contour":
             self._contour_method()
         elif method == "analytic":
-            self._gamma = kwargs["gamma"]
             self._UsvUp = kwargs["UsvUp"]
             self._analytic_method()
         elif method == "experimental":
@@ -231,7 +231,11 @@ class Hugoniot:
         self._hvars["V"] = 1/self._hvars["rho"]
 
     def _analytic_method(self):
-        """
+        """Calculate the hugoniot based on the function Us = Us(Up)
+        Other variables are calculated from the RK jump conditions and assuming
+        P0 = 0 and E0 = 0 
+
+        Requires the method self._UsvUp to be set during EOS initialization
         """
         up = np.linspace(0,100,1000)
         us = self._UsvUp(up)
@@ -256,63 +260,123 @@ class Hugoniot:
         """
         return (self._hvars[key] for key in args)
 
-    def release_isentrope(self, *args, method="hawreliak", **kwargs) -> "GPa":
+    def fYvX(self, X, Y, bounds_error=False):
+        """Get an interpolated function of Y = Y(X) of two hugoniot variables
+
+        Args
+        ----
+        X : X value hugoniot variable
+        Y : Y value hugoniot variable
+        bounds_error : throws an error if function recieves value outside of 
+            interpolation range
+
+        Returns
+        -------
+        numpy interp1d function
+
+        Example
+        -------
+        fPvUp = hugoniot.fYvX("Up", "P")
+        """
+        f = interp1d(*self.get_vars(X, Y), bounds_error=bounds_error)
+        return f
+    
+    def aproxY_given_X(self, Y, X, X0):
+        """Return an approximate value for a hugoniot variable, given another
+        hugoniot variable
+
+        Args
+        ----
+        Y, X (str) : Hugoniot variables to use i.e. "P", "E", "Up", "Us", "V"
+        X0 (float) : the reference value
+        """
+        Y, X = self.get_vars(Y, X)
+        return Y[np.argmin(np.abs(X-X0))]
+
+    def release(self, *args, model="mirrored_hugoniot", **kwargs) -> "GPa":
         """Calculate the release isentrope using the Gruneisen correction to the
         hugoniot 
 
-        This method should be over written
+        This method can be over written if a custom release is desired, the
+        return function just needs to be matched.
 
         Args
         ----
-        P0 : the pressure state to release from 
-        gamma : The gurneisen parameter
+        P1 : the pressure state to release from 
+        model:
+            mirrored_hugoniot : use the mirror image of the hugoniot in the 
+                P-Up plane to estimate the release isentroope 
+                args
+                ---
+                P1 : Pressure state to release from =
+            mg : Use the Mie-Gruniesen EOS to calculate the isentrope
+                args
+                ----
+                P1 : Pressure state to release from =
+                gamma : a constant value for gamma
+            custom : Use a custom release model
+                requires overloading the Hugoniot.release_model method
 
         Return 
         ------
-        interpolated function of pressure along the isentrope in P, Up plane
+        interpolated function of pressure along the isentrope in P-Up plane
         """
-        if method == "hawreliak":
-            return self._hawreliak_release(*args, **kwargs)
-        elif method == "knudson":
-            return self._knudson_release(*args)
-        elif method == "brygoo":
-            return self._brygoo_release(*args)
+        if model  == "mirrored_hugoniot":
+            return self._mirrored_hugoniot(*args, **kwargs)
+        elif model  == "mg":
+            return self._mg_release(*args, **kwargs)
+        elif model == "custom":
+            return self.release_model(*args, **kwargs)
 
-    def _knudson_release(self, Up):
+    def release_model(self, *args, **kwargs):
+        """Should be over written with a custom release model
         """
-        Following the formalism outlined in M. Knudson and M. Desjarlais 2013
-        """
-        rho, P, E, Up, Us = self.get_vars("rho", "P", "E", "Up", "Us")
+        pass
 
+    def _mirrored_hugoniot(self, P1):
+        """Return a mirrored hugoniot in the P-Up plane about a particle velocity
 
-        # Calculate Co of the equation Us = C0 + SUp
-        # Equation (4) 
-        Co = Us - S*up
-        print(Co)
-
-        # Get the value for a non-constant gamma
-        # Equation (6)
-
-    def _hawreliak_release(self, P0):
-        """
         Args
         ----
-        P0 : Release pressure state
+        P1 : Hugoniot pressure state to release from 
+
+        Returns
+        ------
+        Interpolated function of P = P(Up) of the release hugoniot
+        """
+        aproxUp = self.aproxY_given_X("Up", "P", X0=P1)
+        fPvUp = self.fYvX("Up", "P", bounds_error=False)
+        Up1 = fmin(
+            lambda up: (fPvUp(up)-P1)**2, aproxUp, disp=None)
+        return lambda up: fPvUp(2*Up1-up)
+
+    def _mg_release(self, P1, gamma):
+        """Mie-Gurniesen Release
+
+        Solves the function Ps = Ph + gamma/V * (Es-Eh)
+        Using the integral method from J. Hawreliak
+
+        Args
+        ----
+        P1 : Release pressure state
+        gamma : constant value of gamma to use in the Mie-Gurniesen correction
+
+        Returns
+        -------
+        interpolated function of P = P(Us) pressure along the isentrope 
         """
 
-        rho, P, E, Up, Us = self.get_vars("rho", "P", "E", "Up", "Us")
-        fUpvV = interp1d(1/rho, Up, bounds_error=False)
-        fPvV = interp1d(1/rho, P, bounds_error=False)
-        fEvV = interp1d(1/rho, E)
-        fUsvP = interp1d(P, Us)
-
-        gamma = self._gamma(fUsvP(P0))
+        V, P, E, Up, Us = self.get_vars("V", "P", "E", "Up", "Us")
+        fUpvV = self.fYvX("V", "Up", bounds_error=False)
+        fPvV = self.fYvX("V", "P", bounds_error=False)
+        fEvV = self.fYvX("V", "E", bounds_error=False)
+        fUsvP = self.fYvX("P", "Us", bounds_error=False)
 
         # On release V0 is the volume that the shocked pressure state
         # and the final Volume to consider is when P=0
-        aproxV0 = 1/rho[np.argmin(np.abs(P-P0))]
-        aproxVf = 1/rho[np.argmin(np.abs(P))]
-        V0 = fmin(lambda v: np.abs(fPvV(v) - P0), aproxV0, disp=False)
+        aproxV0 = self.aproxY_given_X("V", "P", X0=P1)
+        aproxVf = self.aproxY_given_X("V", "P", X0=0)
+        V0 = fmin(lambda v: np.abs(fPvV(v) - P1), aproxV0, disp=False)
 
         V = np.linspace(aproxVf, V0, 10000)
         dV = np.average(np.diff(V))
@@ -374,22 +438,3 @@ class Hugoniot:
         plt.ylim(-10, 800)
         plt.xlim(-.5, 15)
         plt.grid()
-
-
-    def mirrored_hugoniot(f_P, mirror_about_up=None, mirror_at_p=None, aproxUp=15):
-        """Return a mirrored hugoniot in the P-Up plane about a particle velocity
-
-        Args
-        ----
-        mirror_about_up : the particle velocity to mirror the hugoniot about
-        """
-        if mirror_about_up:
-            return lambda up: f_P(2*mirror_about_up-up)
-        if mirror_at_p:
-            mirror_about_up = fmin(
-                    lambda up: (f_P(up)-mirror_at_p)**2, 
-                    aproxUp, 
-                    disp=None)
-            return lambda up: f_P(2*mirror_about_up-up)
-
-
