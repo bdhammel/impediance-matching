@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from scipy.interpolate import interp1d, interp2d
 from scipy.optimize import fmin
-#from scipy.integrate import cumtrapz
+from scipy.integrate import odeint
 
 class EOS:
     def __init__(self, filename, hugoniot_method="EOS-contour", **kwargs):
@@ -305,7 +305,7 @@ class Hugoniot:
         """Get the Value of a hugoniot variable, Y, given a hugoniot variable, X
         """
         fY = self.fYvX(X, Y)
-        return fY(X0)
+        return float(fY(X0))
 
     def release(self, *args, model="mirrored_hugoniot", **kwargs) -> "GPa":
         """Calculate the release isentrope using the Gruneisen correction to the
@@ -378,7 +378,7 @@ class Hugoniot:
             lambda up: (fPvUp(up)-P1)**2, aproxUp, disp=None)
         return lambda up: fPvUp(2*Up1-up)
 
-    def _mg_release(self, P1, gamma):
+    def _mg_release(self, P1, gamma, method="integral"):
         """Mie-Gurniesen Release
 
         Solves the function Ps = Ph + gamma/V * (Es-Eh)
@@ -393,46 +393,63 @@ class Hugoniot:
         -------
         interpolated function of P = P(Up) pressure along the isentrope 
         """
+        Us1 = self.YgivenX("Us", "P", P1)
+        Up1 = self.YgivenX("Up", "P", P1)
+        E1 = self.YgivenX("E", "P", P1)
+        V1 = self.YgivenX("V", "P", P1)
 
-        V, P, E, Up, Us = self.get_vars("V", "P", "E", "Up", "Us")
-        fUpvV = self.fYvX("V", "Up", bounds_error=False)
-        fPvV = self.fYvX("V", "P", bounds_error=False)
-        fEvV = self.fYvX("V", "E", bounds_error=False)
-        fUsvP = self.fYvX("P", "Us", bounds_error=False)
+        fPhvV = self.fYvX("V", "P")
+        fEhvV = self.fYvX("V", "E")
 
-        # On release V0 is the volume that the shocked pressure state
-        # and the final Volume to consider is when P=0
-        aproxV0 = self.aproxY_given_X("V", "P", X0=P1)
-        aproxVf = self.aproxY_given_X("V", "P", X0=0)
-        V0 = fmin(lambda v: np.abs(fPvV(v) - P1), aproxV0, disp=False)
+        if method == "integral":
+            _steps = 1000
+            dV = (self.V0-V1)/_steps
+            F = [P1]
+            V = [V1]
+            Ps = [P1]
+            E = [E1]
+            intF = [0]
+            Ups = [Up1]
 
-        V = np.linspace(aproxVf, V0, 10000)
-        dV = np.average(np.diff(V))
+            for n in range(1, _steps):
 
-        F = fPvV(V) - gamma/V*(fEvV(V) - fEvV(V0))
+                V.append(V[n-1] + dV)
 
-        # the last point in the array is the Pressure to release from, 
-        # therefore, the integral needs to be performed in reverse order - to 
-        # traverse away from the release pressure 
-        intF = np.cumsum(
-                np.append(
-                    .5*( np.power(V[:-1], gamma)*F[:-1] 
-                    - np.power(V[1:], gamma)*F[1:]) * dV,
-                    0
-                    )[::-1]
-                )[::-1]
+                F.append(fPhvV(V[n]) - gamma/V[n]*(fEhvV(V[n]) - E1))
 
-        # Find the pressures along the isentrope 
-        Ps = F - gamma / np.power(V, gamma+1) * intF
+                intF.append(
+                        (V[n]**gamma * F[n] + V[n-1]**gamma * F[n-1]) * dV/2 \
+                        + intF[n-1]
+                        )
 
-        # Find the particle velocities corresponding the release isentrope
-        # pressures
-        Ups = np.append(
-                fUpvV(V0),
-                np.cumsum(
-                    np.sqrt(np.diff(Ps))*np.sqrt(-dV)
-                    )[::-1]
-                )[::-1]
+                # Find the pressures along the isentrope 
+                Ps.append(F[n] - gamma / np.power(V[n], gamma+1) * intF[n])
+
+                # Find the particle velocities corresponding the release isentrope
+                # pressures
+                Ups.append(Ups[n-1] + np.sqrt((Ps[n-1] - Ps[n])/dV)*dV)
+        elif method == "ode":
+            def dhdv(h, V, Up1):
+                a, b = c(Up1)
+                fv1 = lambda v : gamma*v**gamma/self.V0
+                fv2 = lambda v: b*(1-v/self.V0)
+
+                return fv1(V) * a**2 * fv2(V)**2/(1-fv2(V))**3
+
+            def c(up):
+                if up < 6.358:
+                    return [1.87299, 1.667]
+                else:
+                    return [4.36049, 1.276]
+
+            V = np.linspace(V1, self.V0, 1000)
+            dV = np.diff(V).mean()
+
+            h_v = odeint(dhdv, P1, V, args=(Up1,)).T[0]
+            Ps = V**(gamma+1)*(h_v - h_v[0]) + fPhvV(V)
+
+        #import ipdb; ipdb.set_trace()
+
 
         return interp1d(Ups, Ps, bounds_error=False)
 

@@ -65,7 +65,7 @@ def get_intersection(f, g, near_x):
     """
     h = lambda x: (f(x) - g(x))**2
     x = fmin(h, near_x, maxfun=1000, disp=False)
-    return x, f(x)
+    return x, f(x)[0]
 
 
 

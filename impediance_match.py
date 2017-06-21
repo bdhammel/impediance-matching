@@ -8,6 +8,18 @@ from scipy.interpolate import interp1d
 from eos import EOS
 from util import get_intersection, MonteCarloVariable
 
+def var_gamma(Us):
+    """Taken from Marcus' email to Jim (Jun 15 2017)
+    """
+    a1 = 0.579
+    a2 = 0.129
+    a3 = 12.81
+
+    if Us > 14.69:
+        return a1*(1 - np.exp(-a2*(Us - a3)**1.5))
+    else:
+        return 0.11016009*Us - 1.4544581;
+
 def impedence_matching_exp(ref_mat, tar_mat, ref_Us, tar_Us, showplot=False):
     """Simulate an impedance matching experiment
 
@@ -25,7 +37,7 @@ def impedence_matching_exp(ref_mat, tar_mat, ref_Us, tar_Us, showplot=False):
     P_interface (float) : the pressure at the reference-sample interface
     """
     # Particle speed points, used in retrieving info from interpolated functions
-    up = np.linspace(0,100,1000)
+    up = np.linspace(4,50,100)
 
     # Find the pressure state in the reference material, given the measured shock
     # speed
@@ -34,7 +46,8 @@ def impedence_matching_exp(ref_mat, tar_mat, ref_Us, tar_Us, showplot=False):
     Up_ref, P_ref = get_intersection(ref_rayleigh, refh_PvUp, near_x=ref_Us)
 
     # Calculate the release from the pressure state in the reference material 
-    ref_rels = ref_mat.hugoniot.release(P_ref, model="mg", gamma=.66)
+    ref_rels = ref_mat.hugoniot.release(P_ref, model="mg", method="integral", gamma=var_gamma(ref_Us))
+    #ref_rels = ref_mat.hugoniot.release(P_ref, model="custom", gamma=.66)
 
     # Find the Rayleigh line in the sample target material given the measure 
     # shock speed in that material
@@ -63,7 +76,7 @@ def impedence_matching_exp(ref_mat, tar_mat, ref_Us, tar_Us, showplot=False):
         plt.legend()
         plt.grid()
 
-    return Up_interface[0], P_interface[0] 
+    return Up_interface, P_interface
 
 def monte_carlo_error_analysis(ref_mat, tar_mat, ref_Us, tar_Us):
     pass
@@ -72,14 +85,11 @@ def monte_carlo_error_analysis(ref_mat, tar_mat, ref_Us, tar_Us):
 if __name__ == "__main__":
 
 
-    def quartz_UsvUp(up, method="linear"):
-
-        A0 = 1.754
-        A1 = 1.862
-        A2 = -0.03364
-        A3 = 0.0005666
-
-        if method == "cubic":
+    def quartz_UsvUp(model="knudson"):
+        """
+        Up must be array type
+        """
+        def knudson(up):
             """Us-Up relations for the calculation of Quartz hugoniot
             Both Us-Up relations from Knudson's paper are near identical for
             values of up < 25
@@ -87,23 +97,34 @@ if __name__ == "__main__":
             M. Knudson and M. Desjarlais Phys Rev B (88) 2013
                 Using equation A1 with constants from table XII
 
-            return A0 + A1*up + A2*up**2 + A3*up**3
             """
             return 6.278 + 1.193*up - 2.505*up*np.exp(-.3701*up)
-        elif method == "linear":
+
+        def knudson_cubic(up):
+            A0 = 1.754
+            A1 = 1.862
+            A2 = -0.03364
+            A3 = 0.0005666
+            return A0 + A1*up + A2*up**2 + A3*up**3
+
+        def hicks(up):
+            try:
+                up[0]
+            except:
+                up = np.array(up)
+                print("Up wasnt and array")
             us1 = 6.914 + 1.667*(up[up<6.358]-3.0244)
             us2 = 19.501 + 1.276*(up[up>=6.358]-11.865)
             return np.hstack((us1, us2))
 
-    def quartz_mg(self, P1, gamma):
-        def c(us):
-            return 1
+        if model == "knudson":
+            return knudson
+        elif model == "knudson-cubic":
+            return knudson_cubic
+        elif model == "hicks":
+            return hicks
 
-        def dhdv(h, V, args):
-            b = 1
-            fv1 = lambda v : gamma*v**gamma/self.V0
-            fv2 = lambda v: b*(1-v/self.V0)
-            return fv1(V) * c(args[0])**2 * fv2(V)**2/(1-fv2(V))**3
+    def quartz_mg(self, P1, gamma):
 
         Us1 = self.YgivenX("Us", "P", P1)
         Up1 = self.YgivenX("Up", "P", P1)
@@ -113,18 +134,21 @@ if __name__ == "__main__":
         V = np.linspace(V1, aproxVf, 10000)
         dV = np.diff(V).mean()
 
-        h_v = odeint(dhdv, E1, V, args=(Us1,)).T[0]
+        h_v = odeint(dhdv, P1, V, args=(Us1,)).T[0]
 
-        fPhvV = self.fYvX("V", "P", bounds_error=False)
+        fPhvV = self.fYvX("V", "P")
 
         Ps = V**(gamma+1)*(h_v - h_v[0]) + fPhvV(V)
-        up = Up1 + cumtrapz(
-                    y=np.sqrt(-np.diff(V)/np.diff(Ps)),
-                    x=Ps[1:]
-                    )
 
-        import ipdb; ipdb.set_trace()
-        return interp1d(up, Ps, bounds_error=False)
+        # 
+        #temp_f = cumtrapz(y=np.sqrt(-np.diff(Ps)/dV), dx=dV)
+        #up = Up1 + np.append(0, temp_f)
+
+        Ups = Up1 + np.append(0, np.cumsum(
+                                            np.sqrt(-np.diff(Ps))*np.sqrt(dV)
+                                            ))
+
+        return interp1d(Ups, Ps, bounds_error=False)
 
     def quartz_mglr(self, P1):
         """The MGLR release model of quarts
@@ -172,14 +196,14 @@ if __name__ == "__main__":
     plt.close('all')
 
     ch = EOS("../data/eos_32.dat")
+    ch._rho0 = 1.05
     q = EOS("../data/eos_24.dat", 
             hugoniot_method="analytic",
-            UsvUp=quartz_UsvUp
+            UsvUp=quartz_UsvUp(model="knudson-cubic")
             )
+
     # overload the quarts hugoniot with the MGLR model 
     #q.hugoniot.release_model = types.MethodType(quartz_mglr, q.hugoniot) 
-    #q.hugoniot.release_model = types.MethodType(quartz_mg, q.hugoniot) 
-
 
     #import Barrios data
     barrios = pd.read_csv("../data/barrios.dat", sep="\s+", index_col=False)
@@ -217,10 +241,10 @@ if __name__ == "__main__":
     ax2.plot(rho, P/100, 'g', label="EOS")
 
     bnd_eng = 32
-    ch._e[ch.pres < 450] += bnd_eng
+    ch._e[ch.pres > 450] -= bnd_eng
     ch._calculate_hugoniot()
     rho, P = ch.hugoniot.get_vars("rho", "P")
-    ax2.plot(rho, P/100, 'g--', label="EOS w/ dissociation")
+    # ax2.plot(rho, P/100, 'g--', label="EOS w/ dissociation")
 
     ax2.set_xlim(2.5, 3.7)
     ax2.set_ylim(0,9)
