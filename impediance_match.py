@@ -1,6 +1,9 @@
+import types
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.integrate import odeint, cumtrapz
+from scipy.interpolate import interp1d
 
 from eos import EOS
 from util import get_intersection, MonteCarloVariable
@@ -42,7 +45,7 @@ def impedence_matching_exp(ref_mat, tar_mat, ref_Us, tar_Us, showplot=False):
     if showplot:
         # Check to make sure the intersection of the reference Rayleigh line
         # matches with the point on the known hugoniot for that material 
-        refh_PvUs = ref_mat.hugoniot.fYvX("Us", "P", bounds_error=False)
+        refh_PvUs = ref_mat.hugoniot.fYvX("Us", "P")
         P_test = refh_PvUs(ref_Us)
 
         plt.figure("IME")
@@ -68,19 +71,8 @@ def monte_carlo_error_analysis(ref_mat, tar_mat, ref_Us, tar_Us):
 
 if __name__ == "__main__":
 
-    def quartz_gamma(Us):
-        """Taken from Marcus' email to Jim (Jun 15 2017)
-        """
-        a1 = 0.579
-        a2 = 0.129
-        a3 = 12.81
 
-        if Us > 14.69:
-            return a1*(1 - np.exp(-a2*(Us - a3)**1.5))
-        else:
-            return 0.11016009*Us - 1.4544581;
-
-    def quartz_UsvUp(up, method="cubic"):
+    def quartz_UsvUp(up, method="linear"):
 
         A0 = 1.754
         A1 = 1.862
@@ -103,10 +95,73 @@ if __name__ == "__main__":
             us2 = 19.501 + 1.276*(up[up>=6.358]-11.865)
             return np.hstack((us1, us2))
 
-    def quartz_mglr():
+    def quartz_mg(self, P1, gamma):
+        def c(us):
+            return 1
+
+        def dhdv(h, V, args):
+            b = 1
+            fv1 = lambda v : gamma*v**gamma/self.V0
+            fv2 = lambda v: b*(1-v/self.V0)
+            return fv1(V) * c(args[0])**2 * fv2(V)**2/(1-fv2(V))**3
+
+        Us1 = self.YgivenX("Us", "P", P1)
+        Up1 = self.YgivenX("Up", "P", P1)
+        E1 = self.YgivenX("E", "P", P1)
+        V1 = self.YgivenX("V", "P", P1)
+        aproxVf = self.aproxY_given_X("V", "P", X0=0)
+        V = np.linspace(V1, aproxVf, 10000)
+        dV = np.diff(V).mean()
+
+        h_v = odeint(dhdv, E1, V, args=(Us1,)).T[0]
+
+        fPhvV = self.fYvX("V", "P", bounds_error=False)
+
+        Ps = V**(gamma+1)*(h_v - h_v[0]) + fPhvV(V)
+        up = Up1 + cumtrapz(
+                    y=np.sqrt(-np.diff(V)/np.diff(Ps)),
+                    x=Ps[1:]
+                    )
+
+        import ipdb; ipdb.set_trace()
+        return interp1d(up, Ps, bounds_error=False)
+
+    def quartz_mglr(self, P1):
         """The MGLR release model of quarts
         """
-        pass
+
+        S = 1.197
+
+        def gamma(Us):
+            """Taken from Marcus' email to Jim (Jun 15 2017)
+            """
+            a1 = 0.579
+            a2 = 0.129
+            a3 = 12.81
+
+            if Us > 14.69:
+                return a1*(1 - np.exp(-a2*(Us - a3)**1.5))
+            else:
+                return 0.11016009*Us - 1.4544581;
+
+        def C0(Up):
+            pass
+
+        def Peff(v):
+            """Effective pressure along the hugoniot
+            Assumes a linear Us-Up hugoniot with slope defined 
+            at the shocked state of the true hugoniot
+            """
+            return self.rho0*C0**2*(self.V0/v - 1)*(self.V0/v) \
+                / (S-(S-1)*(self.V0/v))**2
+
+        def Eeff(v):
+            """Effective energy along the hugoniot
+            """
+            return .5*Peff(v)*(self.V0 - v)
+
+        Useff = lambda up : Co + S*up
+
 
     def onpick(event):
         plt.close("IME")
@@ -121,7 +176,9 @@ if __name__ == "__main__":
             hugoniot_method="analytic",
             UsvUp=quartz_UsvUp
             )
-    #q.hugoniot.release_model = quartz_mglr()
+    # overload the quarts hugoniot with the MGLR model 
+    #q.hugoniot.release_model = types.MethodType(quartz_mglr, q.hugoniot) 
+    #q.hugoniot.release_model = types.MethodType(quartz_mg, q.hugoniot) 
 
 
     #import Barrios data
@@ -153,18 +210,17 @@ if __name__ == "__main__":
     # Plot the data points for Pressure and rho that Barrios found and the 
     # data point that I found
     ax2 = barrios.plot.scatter("rhoCH", "PCH", label="Barrios et al")
-    ax2.scatter(calc_rho, calc_PCH/100, c="r", marker="+", label="My analysis")
+    ax2.scatter(calc_rho, calc_PCH/100, c="r", marker="o", label="My analysis")
 
     # Overlay a plot of the calculated CH hugoniot and CH hugoniot w/ disociation  
-    fPCHvRho = ch.hugoniot.fYvX("rho", "P", bounds_error=False)
-    rho = np.linspace(2, 4, 1000)
-    ax2.plot(rho, fPCHvRho(rho)/100, 'g', label="EOS")
+    rho, P = ch.hugoniot.get_vars("rho", "P")
+    ax2.plot(rho, P/100, 'g', label="EOS")
 
     bnd_eng = 32
     ch._e[ch.pres < 450] += bnd_eng
     ch._calculate_hugoniot()
-    fPCHvRho = ch.hugoniot.fYvX("rho", "P")
-    ax2.plot(rho, fPCHvRho(rho)/100, 'g--', label="EOS w/ dissociation")
+    rho, P = ch.hugoniot.get_vars("rho", "P")
+    ax2.plot(rho, P/100, 'g--', label="EOS w/ dissociation")
 
     ax2.set_xlim(2.5, 3.7)
     ax2.set_ylim(0,9)

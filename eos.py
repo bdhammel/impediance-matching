@@ -57,6 +57,7 @@ class EOS:
         self._p = np.reshape(import_data(NT*NR), (NT, NR))[1:,1:] * 1e-10
         self._e = np.reshape(import_data(NT*NR), (NT, NR))[1:,1:] * 1e-10
 
+        # make den and temp into a 2D array
         self._dden, self._ttemp = np.meshgrid(self._d, self._t)
 
     @property
@@ -121,14 +122,14 @@ class EOS:
         plt.ylabel("Temperature")
         plt.draw()
 
-    def _E_lookup(self, rho:"g/cc", T:"keV")->"erg":
+    def _E_lookup(self, rho:"g/cc", T:"keV")->"kJ":
         """Find an energy value given a density and temperature
 
         Needed in the calculation of the hugoniot
         """
         return self._interp_e(rho, T)
 
-    def _P_lookup(self, rho:"g/cc", T:"keV")->"dynes/cm2":
+    def _P_lookup(self, rho:"g/cc", T:"keV")->"GPa":
         """Find a Pressure value given a density and temperature
 
         Needed in the calculation of the hugoniot
@@ -142,7 +143,12 @@ class EOS:
         self._plot2D(self.pres, "Pressure")
 
     def _calculate_hugoniot(self, method="EOS-contour", **kwargs):
-        """Calculate the materials hugoniot using the contour method
+        """Calculate the materials hugoniot
+
+        Args
+        ----
+        method : method of calculating the hugoniot. See Hugoniot class for 
+            valid mehtods
         """
         self.hugoniot = Hugoniot(self, method, **kwargs)
 
@@ -158,12 +164,10 @@ class Hugoniot:
         ----
         mat (EOS) : material to find the hugoniot for
         method (srt) : method of calculating the hugoniot
-
-        Kwargs
-        ------
-        us
-        gamma
-
+            - EOS-contour : calclulate the Hugoniot base on the contour method
+                through EOS phase space
+            - analytic : Used a fitted function for the Us-Up curve
+            - experimental : Fit experimental data points (NOT IMPLEMENTED YET)
         """
         self.mat = mat
         self._hvars = {}
@@ -235,7 +239,7 @@ class Hugoniot:
         Other variables are calculated from the RK jump conditions and assuming
         P0 = 0 and E0 = 0 
 
-        Requires the method self._UsvUp to be set during EOS initialization
+        Requires the UsvUp kwarg to be passed during EOS initialization
         """
         up = np.linspace(0,100,1000)
         us = self._UsvUp(up)
@@ -257,6 +261,10 @@ class Hugoniot:
 
     def get_vars(self, *args):
         """Return calculated points on the hugoniot
+
+        Args
+        ----
+        (str) any valid hugoniot variables 
         """
         return (self._hvars[key] for key in args)
 
@@ -293,6 +301,12 @@ class Hugoniot:
         Y, X = self.get_vars(Y, X)
         return Y[np.argmin(np.abs(X-X0))]
 
+    def YgivenX(self, Y, X, X0):
+        """Get the Value of a hugoniot variable, Y, given a hugoniot variable, X
+        """
+        fY = self.fYvX(X, Y)
+        return fY(X0)
+
     def release(self, *args, model="mirrored_hugoniot", **kwargs) -> "GPa":
         """Calculate the release isentrope using the Gruneisen correction to the
         hugoniot 
@@ -316,6 +330,8 @@ class Hugoniot:
                 gamma : a constant value for gamma
             custom : Use a custom release model
                 requires overloading the Hugoniot.release_model method
+                To do this, the method type needs to be passed.
+                See release_model docstring for more info
 
         Return 
         ------
@@ -330,6 +346,18 @@ class Hugoniot:
 
     def release_model(self, *args, **kwargs):
         """Should be over written with a custom release model
+
+        To do this, the method type needs to be passed.
+        I.E.: 
+        import types
+        q.hugoniot.release_model = types.MethodType(quartz_mglr, 
+                                                    q.hugoniot) 
+
+        Where q is an EOS instance 
+
+        Must Return
+        -----------
+        interpolated function of P = P(Up) pressure along the isentrope 
         """
         pass
 
@@ -363,7 +391,7 @@ class Hugoniot:
 
         Returns
         -------
-        interpolated function of P = P(Us) pressure along the isentrope 
+        interpolated function of P = P(Up) pressure along the isentrope 
         """
 
         V, P, E, Up, Us = self.get_vars("V", "P", "E", "Up", "Us")
@@ -399,10 +427,10 @@ class Hugoniot:
 
         # Find the particle velocities corresponding the release isentrope
         # pressures
-        Ups = np.cumsum(
-                np.append(
-                    np.sqrt(np.diff(Ps))*np.sqrt(-dV),
-                    fUpvV(V0)
+        Ups = np.append(
+                fUpvV(V0),
+                np.cumsum(
+                    np.sqrt(np.diff(Ps))*np.sqrt(-dV)
                     )[::-1]
                 )[::-1]
 
@@ -438,3 +466,7 @@ class Hugoniot:
         plt.ylim(-10, 800)
         plt.xlim(-.5, 15)
         plt.grid()
+
+
+
+
