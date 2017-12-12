@@ -40,6 +40,7 @@ class MonteCarloVariable:
 
     def generate(self):
         self.value = np.random.normal(self._mean, self._std)
+        return float(self.value)
 
     def __add__(self, x):
         return float(self.value) + float(x)
@@ -65,7 +66,7 @@ def get_intersection(f, g, near_x):
     """
     h = lambda x: (f(x) - g(x))**2
     x = fmin(h, near_x, maxfun=1000, disp=False)
-    return x, f(x)[0]
+    return x[0], f(x)[0]
 
 
 

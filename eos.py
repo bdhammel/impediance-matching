@@ -8,22 +8,35 @@ from scipy.optimize import fmin
 from scipy.integrate import odeint
 
 class EOS:
-    def __init__(self, filename, hugoniot_method="EOS-contour", **kwargs):
+    def __init__(self, filename=None, hugoniot_method="EOS-contour", **kwargs):
         """Import equation of state data
 
         Args
         ----
-        filename
-        hugoniot_method
+        filename (str) : path to the eos data
+        hugoniot_method (str) : the method of calculating the hugoniot. Options
+            are:
+            - EOS-contour : calculate the Hugoniot base on the contour method
+                through EOS phase space
+            - analytic : Used a fitted function for the Us-Up curve
+            - experimental : Fit experimental data points (NOT IMPLEMENTED YET)
+                
 
         Kwargs
         ------
         us (lambda or function) : Needed for 'analytic' calculation of hugoniot
             Needs to be of the form func(up) -> us
+        rho0 (float) : if an EOS is not provided, then an initial density is
+            needed 
 
         """
-        self._read_eos_table(filename)
-        self._calculate_hugoniot(hugoniot_method, **kwargs)
+        if filename:
+            self._read_eos_table(filename)
+        else:
+            self._rho0 = kwargs["rho0"]
+
+        if hugoniot_method:
+            self._calculate_hugoniot(hugoniot_method, **kwargs)
 
     def _read_eos_table(self, filename):
         """Read in an EOS table from the HYADES database
@@ -147,17 +160,33 @@ class EOS:
 
         Args
         ----
-        method : method of calculating the hugoniot. See Hugoniot class for 
-            valid mehtods
+        method (str) : method of calculating the hugoniot. See Hugoniot class for valid 
+            methods
+
+        Kwargs
+        ------
+        us (lambda or function) : Needed for 'analytic' calculation of hugoniot
+            Needs to be of the form func(up) -> us
         """
-        self.hugoniot = Hugoniot(self, method, **kwargs)
+        self.hugoniot = Hugoniot(
+                mat=self, method=method, **kwargs)
 
 class Hugoniot:
 
-    def __init__(self, mat, method="analytic", **kwargs):
-        """Find the hugoniot through a material, mat
+    """
 
-        Each hugoniot finder needs to save the variables: 
+    Parameters
+    ----------
+
+    _hvars (dic) : the material properties variables of the hugoniot
+        rho, T, P, E, Up, Us, and V
+
+    """
+
+    def __init__(self, mat, method="analytic", **kwargs):
+        """Find the hugoniot through a material, mat. 
+
+        Each hugoniot finder method needs to save the variables:  
         rho, T, P, E, Up, Us, and V
 
         Args
@@ -175,28 +204,33 @@ class Hugoniot:
             self._contour_method()
         elif method == "analytic":
             self._UsvUp = kwargs["UsvUp"]
-            self._analytic_method()
+            self._analytic_method(kwargs["upmin"], kwargs["upmax"])
         elif method == "experimental":
             self._exp_method()
 
     @property
     def rho0(self):
+        """Initial density of the material"""
         return self.mat.rho0
 
     @property
     def V0(self):
+        """Initial volume, reciprocal of density, of the material"""
         return 1/self.rho0
 
     @property
     def T0(self) -> "KeV":
+        """Initial tempature"""
         return self._T0
 
     @property
     def P0(self) -> "GPa":
+        """Initial pressure"""
         return self._P0 
 
     @property
     def E0(self) -> "kJ":
+        """Initial internal energy"""
         return self._E0
 
     def _contour_method(self):
@@ -206,10 +240,12 @@ class Hugoniot:
 
         """
 
+        # set initial conditions of the material 
         self._T0 = 2.5e-5
         self._P0 = self.mat._P_lookup(rho=self.rho0, T=self.T0)
         self._E0 = self.mat._E_lookup(rho=self.rho0, T=self.T0)
 
+        # build the contour function 
         zero = self.mat.eng - self.E0 - .5*(self.mat.pres + self.P0) * (self.V0 - self.mat.V)
 
         # Use Matplotlib to find the contour
@@ -234,14 +270,14 @@ class Hugoniot:
         self._hvars["Us"] = (self._hvars["P"] - self.P0)/(self.rho0*self._hvars["Up"])
         self._hvars["V"] = 1/self._hvars["rho"]
 
-    def _analytic_method(self):
+    def _analytic_method(self, upmin, upmax):
         """Calculate the hugoniot based on the function Us = Us(Up)
         Other variables are calculated from the RK jump conditions and assuming
         P0 = 0 and E0 = 0 
 
         Requires the UsvUp kwarg to be passed during EOS initialization
         """
-        up = np.linspace(0,100,1000)
+        up = np.linspace(upmin,upmax,1000)
         us = self._UsvUp(up)
 
         self._P0 = 0
@@ -307,7 +343,7 @@ class Hugoniot:
         fY = self.fYvX(X, Y)
         return float(fY(X0))
 
-    def release(self, *args, model="mirrored_hugoniot", **kwargs) -> "GPa":
+    def release(self, Pref) -> "GPa":
         """Calculate the release isentrope using the Gruneisen correction to the
         hugoniot 
 
@@ -337,14 +373,22 @@ class Hugoniot:
         ------
         interpolated function of pressure along the isentrope in P-Up plane
         """
-        if model  == "mirrored_hugoniot":
-            return self._mirrored_hugoniot(*args, **kwargs)
-        elif model  == "mg":
-            return self._mg_release(*args, **kwargs)
-        elif model == "custom":
-            return self.release_model(*args, **kwargs)
+        if self._release_model_name  == "mirrored_hugoniot":
+            return self._mirrored_hugoniot(Pref,
+                    *self._release_model_args, **self._release_model_kwargs)
+        elif self._release_model_name  == "mg":
+            return self._mg_release(Pref,
+                    *self._release_model_args, **self._release_model_kwargs)
+        elif self._release_model_name == "custom":
+            return self.custom_release_model(Pref,
+                    *self._release_model_args, **self._release_model_kwargs)
 
-    def release_model(self, *args, **kwargs):
+    def set_release_model(self, model, *args, **kwargs):
+        self._release_model_name = model
+        self._release_model_args = args
+        self._release_model_kwargs = kwargs
+
+    def custom_release_model(self, *args, **kwargs):
         """Should be over written with a custom release model
 
         To do this, the method type needs to be passed.
@@ -378,11 +422,10 @@ class Hugoniot:
             lambda up: (fPvUp(up)-P1)**2, aproxUp, disp=None)
         return lambda up: fPvUp(2*Up1-up)
 
-    def _mg_release(self, P1, gamma, method="integral"):
+    def _mg_release(self, P1, gamma, method="ode"):
         """Mie-Gurniesen Release
 
         Solves the function Ps = Ph + gamma/V * (Es-Eh)
-        Using the integral method from J. Hawreliak
 
         Args
         ----
@@ -393,15 +436,22 @@ class Hugoniot:
         -------
         interpolated function of P = P(Up) pressure along the isentrope 
         """
+
+        # Get initial values 
         Us1 = self.YgivenX("Us", "P", P1)
         Up1 = self.YgivenX("Up", "P", P1)
         E1 = self.YgivenX("E", "P", P1)
         V1 = self.YgivenX("V", "P", P1)
 
+        # construct interpolation functions 
         fPhvV = self.fYvX("V", "P")
         fEhvV = self.fYvX("V", "E")
 
-        if method == "integral":
+        if method == "hawreliak-integral":
+            """Acceptable to be used on non-linear Us-Up hugoniots
+            method outlined in Jim's powerpoint "SummaryOfQuartzRelease," emailed
+            on 5/13/2017
+            """
             _steps = 1000
             dV = (self.V0-V1)/_steps
             F = [P1]
@@ -428,13 +478,15 @@ class Hugoniot:
                 # Find the particle velocities corresponding the release isentrope
                 # pressures
                 Ups.append(Ups[n-1] + np.sqrt((Ps[n-1] - Ps[n])/dV)*dV)
-        elif method == "ode":
-            def dhdv(h, V, Up1):
-                a, b = c(Up1)
-                fv1 = lambda v : gamma*v**gamma/self.V0
-                fv2 = lambda v: b*(1-v/self.V0)
 
-                return fv1(V) * a**2 * fv2(V)**2/(1-fv2(V))**3
+        elif method == "brygoo-ode":
+            """Solve the ODE equation outlines in Stephanie's paper:
+
+            S. Brygoo et al. "Development of melted quartz as impedance-matching 
+            standard for strong laser shock measurements" June 2, 2008
+            """
+
+            raise Exception("You didn't get this method working, dude")
 
             def c(up):
                 if up < 6.358:
@@ -442,13 +494,56 @@ class Hugoniot:
                 else:
                     return [4.36049, 1.276]
 
+            def dhdv(h, V, Up1):
+                a, b = c(Up1)
+                fv1 = lambda v : gamma*v**gamma/self.V0
+                fv2 = lambda v: b*(1-v/self.V0)
+
+                return fv1(V) * a**2 * fv2(V)**2/(1-fv2(V))**3
+
+            V = np.linspace(V1, self.V0, 1000)
+            dV = np.diff(V).mean()
+            h1 = 0
+
+            h_v = odeint(dhdv, y0=P1, t=V, args=(Up1,)).T[0]
+            Ps = V**(gamma+1)*(h_v - h_v[0]) + fPhvV(V)
+
+        elif method == "hammel-integral":
+            """Optimized version for the hawreliak integral method 
+            to speed up runtime when implementing the monte carlo error analysis
+
+            Acceptable to be used on non-linear Us-Up hugoniots
+            """
             V = np.linspace(V1, self.V0, 1000)
             dV = np.diff(V).mean()
 
-            h_v = odeint(dhdv, P1, V, args=(Up1,)).T[0]
-            Ps = V**(gamma+1)*(h_v - h_v[0]) + fPhvV(V)
+            F = fPhvV(V) - gamma/V * (fEhvV(V) - E1)
 
-        #import ipdb; ipdb.set_trace()
+            _intF = dV/2 * ( F[:-1]*V[:-1]**gamma + F[1:]*V[1:]**gamma)
+            intF = np.cumsum(np.append(0, _intF))
+
+            Ps = F - gamma / np.power(V, gamma+1) * intF
+
+            _Ups = np.sqrt(-np.diff(Ps)/dV)*dV
+            Ups = np.cumsum(np.append(Up1, _Ups))
+
+        elif method == "ode":
+            """From Knudson 
+            solved ODE for equation (8) and equation (9)
+            """
+
+            V = np.linspace(V1, self.V0, 1000)
+            dV = np.diff(V).mean()
+
+            def ddEdV(fE, v):
+                return -(fPhvV(v)*(1 - gamma/2 * (self.V0/v - 1)) \
+                        + gamma/v * fE)
+
+            dE = odeint(ddEdV, (E1-self.E0),  V).flatten()
+            Ps = -np.diff(dE)/dV
+            
+            _Ups = np.sqrt(-np.diff(Ps)/dV)*dV
+            Ups = np.cumsum(np.append(Up1, _Ups))
 
 
         return interp1d(Ups, Ps, bounds_error=False)
@@ -469,20 +564,223 @@ class Hugoniot:
         http://www.ihed.ras.ru/rusbank/
         """
         hugoniot_pts = pd.read_table(
-                "../data/hugoniot_{}.dat".format(self.eosnum), 
+                "../data/hugoniot_{}.dat".format(self.mat.eosnum), 
                 sep="\s+", skiprows=3, index_col=False)
         hugoniot_pts = hugoniot_pts[hugoniot_pts.m == 1]
 
-        Uph, Ph = self.get_vars("Up", "P")
+        Uph, Ph, rhoh = self.get_vars("Up", "P", "rho")
 
         fig = plt.figure()
-        ax = fig.add_subplot(111)
+        ax1 = fig.add_subplot(111)
 
-        ax.plot(Uph, Ph, 'g-o')
-        hugoniot_pts.plot.scatter("U", "P", ax=ax)
+        ax1.plot(Uph, Ph, 'g-o')
+        hugoniot_pts.plot.scatter("U", "P", ax=ax1)
         plt.ylim(-10, 800)
         plt.xlim(-.5, 15)
         plt.grid()
+
+        fig = plt.figure()
+        ax2 = fig.add_subplot(111)
+
+        ax2.plot(rhoh, Ph, 'g-o')
+        hugoniot_pts.plot.scatter("R", "P", ax=ax2)
+        plt.ylim(-10, 800)
+        plt.xlim(-.5, 15)
+        plt.grid()
+
+
+def quartz_UsvUp(model="knudson"):
+    """
+    Up must be array type
+    """
+    def knudson(up):
+        """Us-Up relations for the calculation of Quartz hugoniot
+        Both Us-Up relations from Knudson's paper are near identical for
+        values of up < 25
+
+        M. Knudson and M. Desjarlais Phys Rev B (88) 2013
+            Using equation A1 with constants from table XII
+
+        """
+        return 6.278 + 1.193*up - 2.505*up*np.exp(-.3701*up)
+
+    def knudson_cubic(up):
+        A0 = 1.754
+        A1 = 1.862
+        A2 = -0.03364
+        A3 = 0.0005666
+        assert np.all(up < 30)
+        return A0 + A1*up + A2*up**2 + A3*up**3
+
+    def hicks(up):
+        try:
+            up[0]
+        except:
+            up = np.array(up)
+            print("Up wasnt and array")
+        us1 = 6.914 + 1.667*(up[up<6.358]-3.0244)
+        us2 = 19.501 + 1.276*(up[up>=6.358]-11.865)
+        return np.hstack((us1, us2))
+
+    if model == "knudson":
+        return knudson
+    elif model == "knudson-cubic":
+        return knudson_cubic
+    elif model == "hicks":
+        return hicks
+
+def quartz_mglr(self, P1):
+    """The MGLR release model of quarts
+    """
+    Us1 = self.YgivenX("Us", "P", P1)
+    Up1 = self.YgivenX("Up", "P", P1)
+    E1 = self.YgivenX("E", "P", P1)
+    V1 = self.YgivenX("V", "P", P1)
+
+    S = 1.197
+    C = Us1 - S*Up1
+
+    def _gamma(Us):
+        """Taken from Marcus' email to Jim (Jun 15 2017)
+        """
+        a1 = 0.579
+        a2 = 0.129
+        a3 = 12.81
+
+        if Us > 14.69:
+            return a1*(1 - np.exp(-a2*(Us - a3)**1.5))
+        else:
+            return 0.11016009*Us - 1.4544581;
+
+    def Peff(v):
+        """Effective pressure along the hugoniot
+        Assumes a linear Us-Up hugoniot with slope defined 
+        at the shocked state of the true hugoniot
+        """
+        return self.rho0*C**2*(self.V0/v - 1)*(self.V0/v) \
+            / (S-(S-1)*(self.V0/v))**2
+
+    def Eeff(v):
+        """Effective energy along the hugoniot
+        """
+        return .5*Peff(v)*(self.V0 - v)
+
+    gamma = _gamma(Us1)
+
+    Useff = lambda up : Co + S*up
+
+    V = np.linspace(V1, self.V0, 1000)
+    dV = np.diff(V).mean()
+
+    F = Peff(V) - gamma/V * (Eeff(V) - E1)
+
+    _intF = dV/2 * ( F[:-1]*V[:-1]**gamma + F[1:]*V[1:]**gamma)
+    intF = np.cumsum(np.append(0, _intF))
+
+    Ps = F - gamma / np.power(V, gamma+1) * intF
+
+    _Ups = np.sqrt(-np.diff(Ps)/dV)*dV
+    Ups = np.cumsum(np.append(Up1, _Ups))
+
+    return interp1d(Ups, Ps, bounds_error=False)
+
+
+
+def quartz_ode_mglr(self, P1):
+    """The MGLR release model of quarts
+    """
+    Us1 = self.YgivenX("Us", "P", P1)
+    Up1 = self.YgivenX("Up", "P", P1)
+    E1 = self.YgivenX("E", "P", P1)
+    V1 = self.YgivenX("V", "P", P1)
+
+    S = 1.197
+    C = Us1 - S*Up1
+
+    def _gamma(Us):
+        """Taken from Marcus' email to Jim (Jun 15 2017)
+        """
+        a1 = 0.579
+        a2 = 0.129
+        a3 = 12.81
+
+        if Us > 14.69:
+            return a1*(1 - np.exp(-a2*(Us - a3)**1.5))
+        else:
+            return 0.11016009*Us - 1.4544581;
+
+    def Peff(v):
+        """Effective pressure along the hugoniot
+        Assumes a linear Us-Up hugoniot with slope defined 
+        at the shocked state of the true hugoniot
+        """
+        return self.rho0*C**2*(self.V0/v - 1)*(self.V0/v) \
+            / (S-(S-1)*(self.V0/v))**2
+
+    def Eeff(v):
+        """Effective energy along the hugoniot
+        """
+        return .5*Peff(v)*(self.V0 - v)
+
+    gamma = _gamma(Us1)
+
+    Useff = lambda up : Co + S*up
+
+    V = np.linspace(V1, self.V0, 1000)
+    dV = np.diff(V).mean()
+
+    def ddEdV(fE, v):
+        return -(Peff(v)*(1 - gamma/2 * (self.V0/v - 1)) + gamma/v * fE)
+
+    dE = odeint(ddEdV, (E1-self.E0),  V).flatten()
+    Ps = -np.diff(dE)/dV
+    
+    _Ups = np.sqrt(-np.diff(Ps)/dV)*dV
+    Ups = np.cumsum(np.append(Up1, _Ups))
+
+    return interp1d(Ups, Ps, bounds_error=False)
+
+
+def dump_hyades_eos(mat):
+    """I don't remember why this was important
+    """
+    p = np.vstack((
+        np.zeros_like(mat._d), mat._p))
+    p = np.hstack((
+        np.zeros(shape=(len(mat._t)+1, 1)), p))
+    p *= 1e10
+
+    e = np.vstack((
+        np.zeros_like(mat._d), mat._e))
+    e = np.hstack((
+        np.zeros(shape=(len(mat._t)+1, 1)), e))
+    e *= 1e10
+
+    d = np.concatenate((
+        [len(mat._d)+1, len(mat._t)+1], 
+        [0], 
+        mat._d, 
+        [0], 
+        mat._t, 
+        p.ravel(), 
+        e.ravel()
+        ))
+
+    i=0;
+    n_chunks = len(d)
+
+    header = """POLYSTYRENE LANL SESAME #7592 DATED: 121488 121588
+    32     3.50000000E+00 6.51000000E+00 1.04400000E+00    6102
+"""
+    with open("test.dat", "w") as f:
+        f.write(header)
+        for i in range(0, n_chunks, 5):
+            chunk = d[i:i+5]
+            line = ("{:15e}"*len(chunk) + "\n").format(*chunk)
+            f.write(line)
+
+
+
 
 
 
