@@ -7,6 +7,12 @@ from scipy.interpolate import interp1d, interp2d
 from scipy.optimize import fmin
 from scipy.integrate import odeint
 
+import os, sys
+
+parent_dir_name = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+if parent_dir_name not in sys.path:
+    sys.path.append(parent_dir_name)
+
 class EOS:
     def __init__(self, filename=None, hugoniot_method="EOS-contour", **kwargs):
         """Import equation of state data
@@ -352,22 +358,7 @@ class Hugoniot:
 
         Args
         ----
-        P1 : the pressure state to release from 
-        model:
-            mirrored_hugoniot : use the mirror image of the hugoniot in the 
-                P-Up plane to estimate the release isentroope 
-                args
-                ---
-                P1 : Pressure state to release from =
-            mg : Use the Mie-Gruniesen EOS to calculate the isentrope
-                args
-                ----
-                P1 : Pressure state to release from =
-                gamma : a constant value for gamma
-            custom : Use a custom release model
-                requires overloading the Hugoniot.release_model method
-                To do this, the method type needs to be passed.
-                See release_model docstring for more info
+        Pref : the pressure state to release from 
 
         Return 
         ------
@@ -384,6 +375,27 @@ class Hugoniot:
                     *self._release_model_args, **self._release_model_kwargs)
 
     def set_release_model(self, model, *args, **kwargs):
+        """Set the release model to be used in the release calculations
+
+        Args
+        ----
+        model (str) : Can be any of the following  
+            mirrored_hugoniot : use the mirror image of the hugoniot in the 
+                P-Up plane to estimate the release isentroope 
+                args
+                ---
+                P1 (float) : Pressure state to release from =
+            mg : Use the Mie-Gruniesen EOS to calculate the isentrope
+                args
+                ----
+                P1 (float) : Pressure state to release from =
+                gamma (float) : a constant value for gamma
+                method (str) : 
+            custom : Use a custom release model
+                requires overloading the Hugoniot.release_model method
+                To do this, the method type needs to be passed.
+                See release_model docstring for more info
+        """
         self._release_model_name = model
         self._release_model_args = args
         self._release_model_kwargs = kwargs
@@ -396,7 +408,6 @@ class Hugoniot:
         import types
         q.hugoniot.release_model = types.MethodType(quartz_mglr, 
                                                     q.hugoniot) 
-
         Where q is an EOS instance 
 
         Must Return
@@ -431,6 +442,11 @@ class Hugoniot:
         ----
         P1 : Release pressure state
         gamma : constant value of gamma to use in the Mie-Gurniesen correction
+        method (str) :
+            ode : basic ODE method from knudson's paper
+            hawreliak-integral : based on notes Jim sent me 
+            hammel-integral : an optimized version of hawreliak-integral
+            brygoo-ode : implementation from brygoo's paper
 
         Returns
         -------
